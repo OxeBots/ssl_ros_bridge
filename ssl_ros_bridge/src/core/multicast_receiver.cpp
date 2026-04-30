@@ -20,7 +20,6 @@
 
 #include "multicast_receiver.hpp"
 
-
 #include <ifaddrs.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -41,49 +40,50 @@ MulticastReceiver::MulticastReceiver(
   std::string multicast_address_string,
   uint16_t multicast_port,
   ReceiveCallback receive_callback,
-  std::string interface_address)
-: receive_callback_(receive_callback),
+  std::string interface_address) : receive_callback_(receive_callback),
   multicast_socket_(io_service_)
 {
-  const auto multicast_address = boost::asio::ip::make_address(multicast_address_string).to_v4();
-  const boost::asio::ip::udp::endpoint multicast_endpoint(multicast_address, multicast_port);
-  multicast_socket_.open(multicast_endpoint.protocol());
-  multicast_socket_.set_option(boost::asio::ip::udp::socket::reuse_address(true));
-  multicast_socket_.bind(multicast_endpoint);
-  if (interface_address.empty()) {
-    // If no interface specified, join on all interfaces
-    const auto available_interface_addresses = GetIpAdresses(false);
-    for(const auto & address : available_interface_addresses) {
-      try {
-        multicast_socket_.set_option(
-        boost::asio::ip::multicast::join_group(
-          multicast_address,
-          boost::asio::ip::make_address_v4(address)));
-      } catch (const boost::system::system_error & e) {
-        /* Ignore "address already in use" exceptions. This just indicates multiple addresses
-         * assigned to the same interface.
-         */
-        if(e.code().value() != EADDRINUSE) {
-          boost::rethrow_exception(boost::current_exception());
-        }
-      }
-    }
-  } else {
-    multicast_socket_.set_option(
-      boost::asio::ip::multicast::join_group(
-        multicast_address,
-        boost::asio::ip::make_address_v4(interface_address)));
-  }
-  multicast_socket_.async_receive_from(
-    boost::asio::buffer(buffer_), sender_endpoint_,
-    boost::bind(
-      &MulticastReceiver::HandleMulticastReceiveFrom, this,
-      boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
+  try {
+    const auto multicast_address = boost::asio::ip::make_address(multicast_address_string).to_v4();
+    
+    // CORREÇÃO CRÍTICA: Não bindar no IP multicast. Bindar no endereço genérico (0.0.0.0).
+    // Isso evita o erro "Invalid Argument [system:22]"[cite: 23].
+    const boost::asio::ip::udp::endpoint listen_endpoint(boost::asio::ip::address_v4::any(), multicast_port);
+    
+    multicast_socket_.open(listen_endpoint.protocol());
+    multicast_socket_.set_option(boost::asio::ip::udp::socket::reuse_address(true));
+    multicast_socket_.bind(listen_endpoint);
 
-  io_service_thread_ = std::thread(
-    [this]() {
-      io_service_.run();
-    });
+    // Join no grupo multicast
+    if (interface_address.empty()) {
+      const auto available_interface_addresses = GetIpAdresses(false);
+      for(const auto & address : available_interface_addresses) {
+        try {
+          multicast_socket_.set_option(
+            boost::asio::ip::multicast::join_group(
+              multicast_address, boost::asio::ip::make_address_v4(address)));
+        } catch (...) {
+          // Ignora interfaces que não suportam o grupo
+        } 
+      }
+    } else {
+      multicast_socket_.set_option(
+        boost::asio::ip::multicast::join_group(
+          multicast_address, boost::asio::ip::make_address_v4(interface_address)));
+    }
+
+    std::cout << "[INFO] Bridge escutando multicast em " << multicast_address_string << ":" << multicast_port << std::endl;
+
+    multicast_socket_.async_receive_from(
+      boost::asio::buffer(buffer_), sender_endpoint_,
+      boost::bind(&MulticastReceiver::HandleMulticastReceiveFrom, this,
+        boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
+
+    io_service_thread_ = std::thread([this]() { io_service_.run(); });
+    
+  } catch (const std::exception & e) {
+    std::cerr << "[ERRO FATAL] Falha ao iniciar receptor UDP: " << e.what() << std::endl;
+  }
 }
 
 MulticastReceiver::~MulticastReceiver()
@@ -100,13 +100,10 @@ void MulticastReceiver::SendTo(
 {
   if (length >= send_buffer_.size()) {
     std::cout << "WARNING: UDP send data length is larger than buffer" << std::endl;
-
     return;
   }
 
   // Copy to buffer
-  // Better to send an invalid packet than to overrun the buffer
-  // With the if statement above, this should never happen
   memcpy(send_buffer_.data(), data, std::min(send_buffer_.size(), length));
 
   boost::asio::ip::udp::endpoint endpoint(boost::asio::ip::address::from_string(address), port);
@@ -138,7 +135,6 @@ void MulticastReceiver::HandleMulticastReceiveFrom(
       &MulticastReceiver::HandleMulticastReceiveFrom, this,
       boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
 }
-
 
 void MulticastReceiver::HandleUDPSendTo(const boost::system::error_code & error, size_t)
 {
