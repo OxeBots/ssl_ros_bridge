@@ -32,8 +32,7 @@ std::vector<std::string> GetIpAdresses(const bool include_ipv6)
   std::vector<std::string> addresses;
   ifaddrs * iface_info = nullptr;
   getifaddrs(&iface_info);
-  auto iface_info_current = iface_info;
-  while(iface_info_current != nullptr) {
+  for (auto iface_info_current = iface_info; iface_info_current != nullptr; iface_info_current = iface_info_current->ifa_next) {
     if(!iface_info_current->ifa_addr) {
       continue;
     }
@@ -53,8 +52,6 @@ std::vector<std::string> GetIpAdresses(const bool include_ipv6)
       inet_ntop(AF_INET6, net_address, buffer, INET6_ADDRSTRLEN);
       addresses.emplace_back(buffer);
     }
-
-    iface_info_current = iface_info_current->ifa_next;
   }
   if(iface_info != nullptr) {
     freeifaddrs(iface_info);
